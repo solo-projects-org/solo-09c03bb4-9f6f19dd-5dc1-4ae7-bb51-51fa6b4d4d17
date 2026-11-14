@@ -7,13 +7,14 @@ import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
 from .ais import MAX_SPEED_KNOTS
+from . import reconcile, recon_store
 from .db import connect, init_db, read_tx
-from .store import Store, UploadError
+from .store import Store, UploadError, StaleRevisionError
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("AIS_DATA_DIR", BASE_DIR.parent / "data"))
@@ -378,6 +379,126 @@ def _render_isolated_csv(mmsi: str, rows) -> bytes:
 @app.get("/healthz", response_class=PlainTextResponse)
 def healthz():
     return "ok"
+
+
+# --------------------------------------------------------------------------
+# 站日原档交接对账
+# --------------------------------------------------------------------------
+
+
+def _validate_station_day(station: str, day: str):
+    try:
+        return reconcile.validate_station(station), reconcile.validate_day(day)
+    except reconcile.ManifestError as exc:
+        raise HTTPException(status_code=400, detail=exc.message) from exc
+
+
+@app.get("/reconcile", response_class=HTMLResponse)
+def reconcile_index(request: Request):
+    conn = _conn()
+    try:
+        with read_tx(conn):
+            station_days = recon_store.list_station_days(conn)
+    finally:
+        conn.close()
+    return _render(request, "reconcile_index.html", station_days=station_days)
+
+
+@app.get("/reconcile/{station}/{day}", response_class=HTMLResponse)
+def reconcile_page(request: Request, station: str, day: str):
+    station, day_obj = _validate_station_day(station, day)
+    day = day_obj.isoformat()
+    conn = _conn()
+    try:
+        with read_tx(conn):
+            revision, result = recon_store.build_reconciliation(conn, station, day)
+    finally:
+        conn.close()
+    return _render(
+        request,
+        "reconcile.html",
+        station=station,
+        day=day,
+        revision=revision,
+        result=result,
+        manifest_text="\n".join(result.expected),
+        error=None,
+        stale=False,
+    )
+
+
+@app.post("/reconcile/{station}/{day}", response_class=HTMLResponse)
+async def reconcile_submit(
+    request: Request,
+    station: str,
+    day: str,
+    manifest_text: str = Form(...),
+    revision_token: int = Form(...),
+):
+    station, day_obj = _validate_station_day(station, day)
+    day = day_obj.isoformat()
+
+    try:
+        expected = reconcile.normalize_manifest(manifest_text)
+    except reconcile.ManifestError as exc:
+        # Invalid manifest: nothing is written; re-render with the pasted text.
+        conn = _conn()
+        try:
+            with read_tx(conn):
+                revision, result = recon_store.build_reconciliation(conn, station, day)
+        finally:
+            conn.close()
+        return _render(
+            request,
+            "reconcile.html",
+            station=station,
+            day=day,
+            revision=revision,
+            result=result,
+            manifest_text=manifest_text,
+            error=exc.message,
+            stale=False,
+            status_code=400,
+        )
+
+    import anyio
+
+    def worker() -> int:
+        conn = _conn()
+        try:
+            return _store(conn).replace_manifest(station, day, expected, revision_token)
+        finally:
+            conn.close()
+
+    try:
+        await anyio.to_thread.run_sync(worker)
+    except StaleRevisionError:
+        # The page was opened against an older committed state.  Refuse the
+        # write and keep both the previous manifest and the operator's input.
+        conn = _conn()
+        try:
+            with read_tx(conn):
+                revision, result = recon_store.build_reconciliation(conn, station, day)
+        finally:
+            conn.close()
+        return _render(
+            request,
+            "reconcile.html",
+            station=station,
+            day=day,
+            revision=revision,
+            result=result,
+            manifest_text=manifest_text,
+            error=(
+                "提交被拒绝：本页面打开后该站日的批次或清单已变化（修订号 "
+                f"{revision_token} → {revision}）。请核对下方最新对账结果后重新提交；"
+                "原清单未被修改。"
+            ),
+            stale=True,
+            status_code=409,
+        )
+
+    return RedirectResponse(url=f"/reconcile/{station}/{day}", status_code=303)
 
 
 def _file_chunks(fh, size: int = 1 << 20):

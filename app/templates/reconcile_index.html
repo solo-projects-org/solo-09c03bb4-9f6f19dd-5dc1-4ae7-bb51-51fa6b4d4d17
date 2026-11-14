@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}站日对账{% endblock %}
+{% block content %}
+<h2>站日原档交接对账</h2>
+<p class="muted">按岸站与 UTC 日期选择站日，录入上游交接清单中的预期原档 SHA-256（每行一个，
+可直接粘贴 <code>sha256sum</code> 输出），系统与已发布批次逐档对账：列出缺档、清单外档、重复收档，
+并校验匹配原档是否含解析拒绝行或其他站日定位。只有一一对应且每档内容合格时才显示可交接。</p>
+
+<form id="pick" method="get" style="display:flex;gap:.75rem;flex-wrap:wrap;align-items:end;margin:1rem 0 1.5rem;">
+  <label>岸站标识
+    <input name="station" required maxlength="64" pattern="[A-Za-z0-9_.\-]{1,64}"
+           placeholder="如 SZ01" style="display:block;margin-top:.25rem;padding:.35rem">
+  </label>
+  <label>UTC 日期
+    <input name="day" type="date" required style="display:block;margin-top:.25rem;padding:.35rem">
+  </label>
+  <button type="button" onclick="goReconcile()">打开站日对账</button>
+</form>
+<script>
+function goReconcile() {
+  var f = document.getElementById('pick');
+  var station = encodeURIComponent(f.station.value.trim());
+  var day = encodeURIComponent(f.day.value.trim());
+  if (station && day) { window.location.href = '/reconcile/' + station + '/' + day; }
+}
+</script>
+
+<h2>已有站日</h2>
+{% if station_days %}
+<div class="scroll">
+<table>
+  <thead>
+    <tr><th>岸站</th><th>UTC 日期</th><th class="num">修订号</th><th class="num">清单档数</th><th>最近变化 (UTC)</th><th>操作</th></tr>
+  </thead>
+  <tbody>
+  {% for sd in station_days %}
+    <tr>
+      <td>{{ sd["station"] }}</td>
+      <td>{{ sd["day"] }}</td>
+      <td class="num">{{ sd["revision"] }}</td>
+      <td class="num">{{ sd["manifest_count"] }}</td>
+      <td>{{ sd["updated_at"] }}</td>
+      <td><a href="/reconcile/{{ sd['station'] }}/{{ sd['day'] }}">进入对账</a></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}
+<p class="muted">还没有任何站日数据：上传批次或在上方选择站日后录入清单即可生成。</p>
+{% endif %}
+{% endblock %}

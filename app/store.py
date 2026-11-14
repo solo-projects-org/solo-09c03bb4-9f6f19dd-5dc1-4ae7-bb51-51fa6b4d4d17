@@ -40,6 +40,14 @@ class UploadError(Exception):
         self.message = message
 
 
+class StaleRevisionError(Exception):
+    """The page's revision token is older than the committed station-day state."""
+
+    def __init__(self, current_revision: int):
+        super().__init__(f"站日状态已变化，当前修订号为 {current_revision}")
+        self.current_revision = current_revision
+
+
 @dataclass
 class PublishedBatch:
     batch_id: str
@@ -145,6 +153,7 @@ class Store:
                 )
                 self._insert_rows(conn, batch_id, outcome.rows)
                 self._insert_rejects(conn, batch_id, outcome.rejected)
+                self._bump_station_days(conn, outcome.rows)
                 for mmsi in mmsis:
                     self._recompute_vessel(conn, mmsi, batch_id)
         except Exception as exc:
@@ -288,6 +297,78 @@ class Store:
             "DELETE FROM track_points WHERE mmsi = ? AND version < ?", (mmsi, version)
         )
         conn.execute("DELETE FROM verdicts WHERE mmsi = ? AND version < ?", (mmsi, version))
+
+    # -- station-day reconciliation --------------------------------------
+
+    @staticmethod
+    def _station_day_rows(rows) -> set[tuple[str, str]]:
+        """Distinct (station, UTC day) pairs touched by parsed rows."""
+
+        pairs: set[tuple[str, str]] = set()
+        for row in rows:
+            day = datetime.fromtimestamp(row.utc, timezone.utc).date().isoformat()
+            pairs.add((row.station, day))
+        return pairs
+
+    def _bump_station_days(self, conn: sqlite3.Connection, rows) -> None:
+        """Bump the revision of every station-day this batch contributes to.
+
+        Runs inside the publication transaction, so a failed publication cannot
+        leave a moved revision behind.
+        """
+
+        for station, day in sorted(self._station_day_rows(rows)):
+            self._bump_revision(conn, station, day)
+
+    @staticmethod
+    def _bump_revision(conn: sqlite3.Connection, station: str, day: str) -> int:
+        row = conn.execute(
+            "SELECT revision FROM station_day_state WHERE station = ? AND day = ?",
+            (station, day),
+        ).fetchone()
+        revision = (row["revision"] + 1) if row else 1
+        conn.execute(
+            """
+            INSERT INTO station_day_state (station, day, revision, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(station, day) DO UPDATE SET
+                revision = excluded.revision,
+                updated_at = excluded.updated_at
+            """,
+            (station, day, revision, _utcnow()),
+        )
+        return revision
+
+    def replace_manifest(
+        self, station: str, day: str, expected_sha256: list[str], base_revision: int
+    ) -> int:
+        """Replace a station-day manifest, rejecting stale pages.
+
+        The revision check, the manifest replacement and the revision bump are
+        one ``BEGIN IMMEDIATE`` transaction: either the new manifest is fully
+        stored with a fresh revision, or the previous manifest stays untouched.
+        """
+
+        with write_tx(self.conn) as conn:
+            row = conn.execute(
+                "SELECT revision FROM station_day_state WHERE station = ? AND day = ?",
+                (station, day),
+            ).fetchone()
+            current = row["revision"] if row else 0
+            if current != base_revision:
+                raise StaleRevisionError(current)
+            conn.execute(
+                "DELETE FROM manifests WHERE station = ? AND day = ?", (station, day)
+            )
+            conn.executemany(
+                "INSERT INTO manifests (station, day, expected_sha256, ord, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [
+                    (station, day, digest, ord, _utcnow())
+                    for ord, digest in enumerate(expected_sha256)
+                ],
+            )
+            return self._bump_revision(conn, station, day)
 
 
 def _fsync_dir(path: Path) -> None:

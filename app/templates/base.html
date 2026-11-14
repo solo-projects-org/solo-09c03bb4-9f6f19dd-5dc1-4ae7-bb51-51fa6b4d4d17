@@ -26,6 +26,9 @@
     form.upload input[type=file] { margin-right: .75rem; }
     button { padding: .35rem .9rem; }
     .error { border: 1px solid #b4231855; background: #b4231811; padding: 1rem; border-radius: .5rem; }
+    .handover { padding: .9rem 1rem; border-radius: .5rem; margin: 1rem 0; font-size: .95rem; }
+    .ok-box { border: 1px solid #1a7f3755; background: #1a7f3711; }
+    .bad-box { border: 1px solid #b4231855; background: #b4231811; }
     code { font-size: .85em; }
     .scroll { overflow-x: auto; }
   </style>
@@ -36,6 +39,7 @@
   <nav>
     <a href="/">总览</a>
     <a href="/vessels">船舶</a>
+    <a href="/reconcile">站日对账</a>
   </nav>
   <span class="muted">同秒同位置去重 · 同秒异位整秒隔离 · 相对上一可信点 &gt; {{ max_speed|default(60) }} 节隔离 · 迟到电文全船重算</span>
 </header>

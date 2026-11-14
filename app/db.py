@@ -100,6 +100,32 @@ CREATE TABLE IF NOT EXISTS verdicts (
     PRIMARY KEY (mmsi, version, raw_row_id)
 );
 CREATE INDEX IF NOT EXISTS verdicts_version ON verdicts(mmsi, version);
+
+-- One expected-original manifest per (station, UTC day).  Replacing a manifest
+-- is an upsert in the same transaction that bumps station_day_state.revision,
+-- so a failed attempt leaves the previous manifest in place.
+CREATE TABLE IF NOT EXISTS manifests (
+    station         TEXT NOT NULL,
+    day             TEXT NOT NULL,
+    expected_sha256 TEXT NOT NULL,
+    ord             INTEGER NOT NULL,
+    updated_at      TEXT NOT NULL,
+    PRIMARY KEY (station, day, ord)
+);
+
+-- Monotonic per-station-day revision.  It changes exactly when the set of
+-- published batches touching the station-day changes (a new batch is published)
+-- or the manifest is replaced.  Pages embed the revision they rendered and the
+-- POST endpoint rejects a token that no longer matches, so a stale page can
+-- never overwrite a newer state.
+CREATE TABLE IF NOT EXISTS station_day_state (
+    station     TEXT NOT NULL,
+    day         TEXT NOT NULL,
+    revision    INTEGER NOT NULL,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (station, day)
+);
+CREATE INDEX IF NOT EXISTS station_day_state_day ON station_day_state(day);
 """
 
 

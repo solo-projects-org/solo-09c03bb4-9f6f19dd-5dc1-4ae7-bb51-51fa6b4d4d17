@@ -13,7 +13,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import ais, db
+from app import recon_store
 from app.store import Store
+from app.store import StaleRevisionError
 
 
 def main() -> int:
@@ -103,6 +105,59 @@ def main() -> int:
         ).fetchall()
         assert [p.utc for p in ev.trusted_points] == [r["utc"] for r in persisted]
         print("evaluator matches persisted track")
+
+        # --- Station-day handover reconciliation -------------------------
+        import hashlib
+
+        clean_payload = Path("samples/recon_clean_sz01_20260101.csv").read_bytes()
+        mixed_payload = Path("samples/recon_mixed_sz01_20260101.csv").read_bytes()
+        clean_hash = hashlib.sha256(clean_payload).hexdigest()
+        mixed_hash = hashlib.sha256(mixed_payload).hexdigest()
+        store.publish("recon_clean_sz01_20260101.csv", clean_payload)
+
+        with db.read_tx(conn):
+            rev0, result0 = recon_store.build_reconciliation(conn, "SZ01", "2026-01-01")
+            assert not result0.handover_ok and "清单为空" in result0.blockers[0]
+            print(f"\nreconcile before manifest: revision={rev0} -> {result0.blockers}")
+
+        # Manifest covering every distinct archive SZ01 already received plus
+        # the clean archive: the clean one matches and is content-qualified.
+        with db.read_tx(conn):
+            _, _, earlier_batches = recon_store.load_station_day(conn, "SZ01", "2026-01-01")
+        seen: set[str] = set()
+        manifest_hashes: list[str] = []
+        for digest in [clean_hash] + [b.sha256 for b in earlier_batches]:
+            if digest not in seen:
+                seen.add(digest)
+                manifest_hashes.append(digest)
+        rev1 = store.replace_manifest("SZ01", "2026-01-01", manifest_hashes, rev0)
+        with db.read_tx(conn):
+            _, result1 = recon_store.build_reconciliation(conn, "SZ01", "2026-01-01")
+            clean_match = next(m for m in result1.matched if m.sha256 == clean_hash)
+            assert clean_match.content_ok
+            print(
+                f"manifest covers {len(result1.matched)} archives; "
+                f"clean archive qualified={clean_match.content_ok}, "
+                f"handover_ok={result1.handover_ok}"
+            )
+
+        # A page opened at an older revision is refused once state has moved.
+        try:
+            store.replace_manifest("SZ01", "2026-01-01", [clean_hash], rev1 - 1)
+        except StaleRevisionError as exc:
+            print(f"stale page refused: current revision={exc.current_revision}")
+        else:  # pragma: no cover - defensive
+            raise AssertionError("stale revision token was accepted")
+
+        # A later mixed archive (reject line + other station/day positions)
+        # turns the verdict without any manifest edit.
+        store.publish("recon_mixed_sz01_20260101.csv", mixed_payload)
+        with db.read_tx(conn):
+            rev2, result2 = recon_store.build_reconciliation(conn, "SZ01", "2026-01-01")
+            assert not result2.handover_ok
+            assert [e.sha256 for e in result2.extras] == [mixed_hash]
+            print(f"after mixed upload: revision={rev2} blockers={result2.blockers}")
+            print(f"  extra content problems: {result2.extras[0].content_problems()}")
 
         conn.close()
     print("\nSMOKE OK")

@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block title %}对账 {{ station }} {{ day }}{% endblock %}
+{% block content %}
+<p><a href="/reconcile">← 返回站日列表</a></p>
+<h2>站日对账：<code>{{ station }}</code> · <code>{{ day }}</code>（UTC）</h2>
+
+{% if error %}
+<div class="error" style="margin:.75rem 0;">
+  <strong>{% if stale %}旧页面提交被拒绝（状态冲突 409）{% else %}清单未保存（400）{% endif %}</strong>
+  <p style="margin:.35rem 0 0;">{{ error }}</p>
+</div>
+{% endif %}
+
+{% if result.handover_ok and not error %}
+<div class="handover ok-box">
+  <span class="badge ok" style="font-size:1rem;">✓ 可交接</span>
+  清单与实收原档一一对应（{{ result.matched|length }} 档），且每档内容合格。
+</div>
+{% else %}
+<div class="handover bad-box">
+  <span class="badge bad" style="font-size:1rem;">✗ 不可交接</span>
+  {% if result.blockers %}
+    <ul style="margin:.35rem 0 0 1.25rem;">
+      {% for b in result.blockers %}<li>{{ b }}</li>{% endfor %}
+    </ul>
+  {% else %}
+    请先保存清单后查看结论。
+  {% endif %}
+</div>
+{% endif %}
+
+<form method="post" action="/reconcile/{{ station }}/{{ day }}" class="upload" style="border-style:solid;">
+  <h3 style="margin-top:0;">预期原档 SHA-256 清单</h3>
+  <p class="muted" style="margin-top:0;">每行一个 64 位十六进制 SHA-256；也接受 <code>sha256sum</code> 格式
+  （<code>&lt;hash&gt;  文件名</code>，文件名忽略）。保存后补传批次或更换清单，结论自动重算。</p>
+  <textarea name="manifest_text" rows="8" spellcheck="false"
+    style="width:100%;font-family:ui-monospace,monospace;font-size:.85rem;padding:.5rem;"
+    placeholder="每行一个 SHA-256…">{{ manifest_text }}</textarea>
+  <input type="hidden" name="revision_token" value="{{ revision }}">
+  <p class="muted">页面修订号：<code>{{ revision }}</code>（本页打开时的站日状态；提交时若已变化将被拒绝，原清单保留）</p>
+  <button type="submit">保存清单并对账</button>
+</form>
+
+<h3>对账明细</h3>
+<div class="scroll">
+<table>
+  <thead>
+    <tr><th>类别</th><th>SHA-256</th><th>实收批次</th><th>内容质检</th></tr>
+  </thead>
+  <tbody>
+  {% for m in result.matched %}
+    <tr>
+      <td><span class="badge ok">匹配</span></td>
+      <td><code>{{ m.sha256 }}</code></td>
+      <td>
+        <a href="/batches/{{ m.batch.batch_id }}">{{ m.batch.filename }}</a>
+        <span class="muted">（{{ m.batch.uploaded_at }}）</span>
+      </td>
+      <td>
+        {% if m.content_ok %}
+          <span class="badge ok">合格</span>
+        {% else %}
+          <span class="badge bad">不合格</span>
+          <ul style="margin:.25rem 0 0 1.1rem;padding:0;">
+            {% for p in m.problems %}<li>{{ p }}</li>{% endfor %}
+          </ul>
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  {% for h in result.missing %}
+    <tr>
+      <td><span class="badge bad">缺档</span></td>
+      <td><code>{{ h }}</code></td>
+      <td class="muted">—</td><td class="muted">—</td>
+    </tr>
+  {% endfor %}
+  {% for b in result.duplicates %}
+    <tr>
+      <td><span class="badge warn">重复收档</span></td>
+      <td><code>{{ b.sha256 }}</code></td>
+      <td><a href="/batches/{{ b.batch_id }}">{{ b.filename }}</a> <span class="muted">（{{ b.uploaded_at }}）</span></td>
+      <td>{% if b.content_ok %}<span class="badge ok">合格</span>{% else %}<span class="badge warn">重复即阻断交接</span>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  {% for b in result.extras %}
+    <tr>
+      <td><span class="badge warn">清单外档</span></td>
+      <td><code>{{ b.sha256 }}</code></td>
+      <td><a href="/batches/{{ b.batch_id }}">{{ b.filename }}</a> <span class="muted">（{{ b.uploaded_at }}）</span></td>
+      <td>
+        {% if b.content_ok %}<span class="muted">内容合格但不在清单内</span>
+        {% else %}<span class="badge bad">内容不合格：{{ b.content_problems()|join('；') }}</span>{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  {% if not result.matched and not result.missing and not result.duplicates and not result.extras %}
+    <tr><td colspan="4" class="muted">暂无清单与实收批次。</td></tr>
+  {% endif %}
+  </tbody>
+</table>
+</div>
+
+{% if result.manifest_duplicates %}
+<h3>清单内重复录入</h3>
+<ul>
+  {% for h in result.manifest_duplicates %}<li><code>{{ h }}</code></li>{% endfor %}
+</ul>
+{% endif %}
+
+<p class="muted">
+判定口径：实收批次指已发布且含本站日 <code>{{ station }}</code> 定位行的原档；
+匹配档若含<strong>解析拒绝行</strong>或<strong>其他岸站/他日定位行</strong>即判内容不合格；
+本页全部数据取自同一已提交快照，并发上传不会让一次对账混入新旧状态。
+</p>
+{% endblock %}
